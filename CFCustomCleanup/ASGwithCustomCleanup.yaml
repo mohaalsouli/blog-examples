@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Developed by @malsouli on 10/09/2020.
+  This template creates an ASG that launches 1 server with custom ENI, from a Launch Template.
+  This also has a custom resource to clean up the ASG upon updates to free up the custom ENI for a new server.
+
+
+Parameters:
+  pEnvName:
+    Type: String
+    Default: "test"
+    Description: An environment name to prefix resource names and tags
+  pAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: The availability zone where you want to deploy the server
+  pSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID of the Subnet where you want to deploy the server
+  pSecurityGroupId:
+    Type: String
+    Description: The ID of the Security Group you want to attach to the server
+  pInstanceProfile:
+    Type: String
+    Description: The ARN of the EC2 Instance Profile you want to attach to the server
+  pInstanceType:
+    Type: String
+    Default: t3.small
+    Description: The Type/Size you want the server to be
+  pKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: The EC2 Key Pair you want to launch the server with
+  pAmiId:
+    Type: String
+    Description: The AMI ID you want to launch the server from
+
+
+
+Resources:
+  #The below creates an Elastic Network Interface for our server
+  NetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: ENI for my custom server
+      GroupSet:
+        - !Ref pSecurityGroupId
+      SubnetId: !Ref pSubnetId
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvName}-Server-ENI
+
+  #The below create an Elastic IP for our server and attaches it to the Network Interface above
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pEnvName}-Server-EIP
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties: 
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      NetworkInterfaceId: !Ref NetworkInterface
+
+  #The below creates a simple Launch Template for our server, enabling monitoring and attaching the Network Interface
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties: 
+      LaunchTemplateName: !Sub ${pEnvName}-Server-Template
+      LaunchTemplateData:
+        IamInstanceProfile: 
+          Name: !Ref pInstanceProfile
+        ImageId: !Ref pAmiId
+        InstanceInitiatedShutdownBehavior: terminate
+        InstanceType: !Ref pInstanceType
+        KeyName: !Ref pKeyName
+        Monitoring: 
+          Enabled: true
+        NetworkInterfaces: 
+          - NetworkInterfaceId: !Ref NetworkInterface
+            DeviceIndex: 0
+
+  #The below creates an IAM Role for our custom Clean Up Lambda function, giving it basic access and access to update ASGs
+  ASGCleanupFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${pEnvName}-ASG-Cleanup-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+        - Effect: Allow
+          Principal: 
+              Service: ["lambda.amazonaws.com"]
+          Action: ["sts:AssumeRole"]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies: 
+        - PolicyName: !Sub ${pEnvName}-ASG-Cleanup-Policy
+          PolicyDocument: 
+              Version: 2012-10-17
+              Statement: 
+              - Effect: "Allow"
+                Action: 
+                  - "autoscaling:Describe*"
+                  - "autoscaling:UpdateAutoScalingGroup"
+                Resource: ["*"]
+
+  #The below creates our custom Clean Up Lambda function
+  ASGCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${pEnvName}-ASG-Cleanup-Function
+      Code: #Lambda code has to be inline so CloudFormation can "import cfnresponse" with its modules, i.e. we don't have to attach a dozen files
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          def handler(event, context):
+              print("Starting..")
+              #get the incoming resource properties from event
+              launchTemplateId = event['ResourceProperties']['LaunchTemplateId']
+              launchTemplateVersion = event['ResourceProperties']['LaunchTemplateVersion']
+              #if this is a delete event, just return success as CloudFormation will cleanup everything anyway
+              if event['RequestType'] == "Delete":
+                  print('This is a delete event, nothing to do but return success..')
+                  responseData = {}
+                  responseData['Data'] = "This is a delete event - nothing to do."
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                  print('Done.')
+              #if this is a create event (new resource), just return success as nothing to cleanup
+              elif event['RequestType'] == "Create":
+                  print('This is a create event, there is no ASG to clean up so we will just return success..')
+                  responseData = {}
+                  responseData['Data'] = "This is a create event - there is no ASG to clean up."
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                  print('Done.')
+              #if this is an update event (existing resource), cleanup ASG then return success
+              elif event['RequestType'] == "Update":
+                  print('This is an update event, we will try to clean up the ASG..')
+                  print("Processing the available ASGs..")
+                  autoscaling = boto3.client('autoscaling')
+                  autoscaling_groups = autoscaling.describe_auto_scaling_groups()["AutoScalingGroups"]
+                  for autoscaling_group in autoscaling_groups:
+                      ASG_name = autoscaling_group["AutoScalingGroupName"]
+                      ASG_LT_ID = autoscaling_group["LaunchTemplate"]["LaunchTemplateId"]
+                      ASG_LT_Ver = autoscaling_group["LaunchTemplate"]["Version"]
+                      if ASG_LT_ID == launchTemplateId:
+                          if int(ASG_LT_Ver) == int(launchTemplateVersion):
+                              print(ASG_name+" is the new ASG with the new LT Version "+ASG_LT_Ver+"..")
+                          elif int(ASG_LT_Ver) < int(launchTemplateVersion):
+                              print(ASG_name+" is the old ASG with the old LT Version "+ASG_LT_Ver+"..")
+                              print("Cleaning up ASG "+ASG_name+"..")
+                              autoscaling.update_auto_scaling_group(AutoScalingGroupName=ASG_name,MinSize=0,DesiredCapacity=0,MaxSize=0)
+                  print('Done processing, time to return success..')
+                  responseData = {}
+                  responseData['Data'] = "This is an update event - we cleaned up the old ASG."
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                  print('Done.')
+              #if this is an unknown event, just return success so we don't break CloudFormation at this custom resource making it hard to troubleshoot,
+              #i.e. let CloudFormation continue as usual and errors, if any, will appear on their relevant resources e.g. ASG or LaunchTemplate.
+              else:
+                  print('This is an unknown event, just return success for CloudFormation sake..')
+                  responseData = {}
+                  responseData['Data'] = "This is an unknown event!"
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                  print('Done.')
+      Runtime: python3.7
+      Handler: index.handler
+      Timeout: 120
+      Role: !GetAtt ASGCleanupFunctionRole.Arn
+
+  #The below creates the custom resource that triggers the above function
+  ASGCleanup:
+    Type: Custom::ASGCleanupFunction
+    Properties:
+      ServiceToken: !GetAtt ASGCleanupFunction.Arn
+      LaunchTemplateVersion: !GetAtt LaunchTemplate.LatestVersionNumber
+      LaunchTemplateId: !Ref LaunchTemplate
+
+  #The below creates an ASG to launch a server from the latest version of the Launch Template
+  ServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: ASGCleanup #Note the dependency here so it waits for the custom cleanup to complete
+    UpdatePolicy: #You don't really need an Update Policy with the custom claenup/update process, but let's leave it
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    Properties:
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      AvailabilityZones:
+        - !Ref pAvailabilityZone
+      DesiredCapacity: 1
+      MaxSize: 1
+      MinSize: 1
+      TerminationPolicies: 
+        - OldestLaunchTemplate
+        - Default
+      Tags: 
+        - Key: Name
+          Value: !Sub ${pEnvName}-Server
+          PropagateAtLaunch: true
+
+
+
+Outputs:
+  ServerPrivateIP:
+    Value: !GetAtt NetworkInterface.PrimaryPrivateIpAddress
+  ENIid:
+    Value: !Ref NetworkInterface
