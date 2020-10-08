@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Developed by @malsouli on 07/10/2020.
+  This template creates components and an Image Recipe to create a custom Linux AMI.
+  This also creates a Security Group and an Instance Profile for the build instances.
+
+#Note:
+#For the first ImageBuilder you deploy, you MIGHT have to accept the T&Ms in License Manager
+#E.g.: https://ap-southeast-2.console.aws.amazon.com/license-manager/home?region=ap-southeast-2
+#For more on the components documents, see https://docs.aws.amazon.com/imagebuilder/latest/userguide/image-builder-application-documents.html
+#or see here for the available data commands https://docs.aws.amazon.com/imagebuilder/latest/userguide/image-builder-action-modules.html
+
+Parameters:
+  pEnvName:
+    Type: String
+    Default: "linux-test"
+    Description: An environment name to prefix resource names
+  pVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The ID of the VPC you want to use to build and test instances
+  pSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID of the Subnet you want to use to build and test instances, must be in the VPC above
+  pKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: The EC2 Key Pair you want to launch the build and test instances with
+  pLoggingBucket:
+    Type: String
+    Description: The S3 bucket you want to send logs to
+  pCostCenter:
+    Type: String
+    Description: A value to add a CostCenter tag
+    Default: "Test-Stacks"
+
+
+
+Resources:
+#The below creates an empty security group
+  ImageBuilderSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: !Sub ImageBuilder-${pEnvName}
+      GroupDescription: Image Builder Security Group
+      VpcId: !Ref pVpcId
+
+#The below creates an IAM Role with basic EC2 Image Builder policies plus access to write logs in S3
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /executionServiceEC2Role/
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - "arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder"
+      Policies:
+        - PolicyName: "S3-Write-Logs"
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement: 
+            - Effect: Allow
+              Action:
+                - "s3:PutObject"
+              Resource: !Sub "arn:aws:s3:::${pLoggingBucket}/*"
+#The below creates an instance profile from the Role above
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /executionServiceEC2Role/
+      Roles:
+        - !Ref InstanceRole
+
+#The below creates a custom Component to run a script to create a file
+  CreateFileComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties: 
+      Name: Linux-CreateFile
+      Description: Component to create a file on Linux then test it
+      Version: 1.0.0
+      ChangeDescription: Initial version
+      Platform: Linux
+      Data: !Sub |
+        name: CreateFile
+        description: Creates file and tests it
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateFile
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - echo "I am contents." > myFile.txt
+          - name: test
+            steps:
+              - name: TestFile
+                action: ExecuteBash
+                onFailure: Abort
+                maxAttempts: 2
+                inputs:
+                  commands:
+                    - if [ -e myFile.txt ]; then echo "File exists."; fi || exit 1
+
+#The below creates the Infrastructure Configuration for our EC2 Image Builder
+  InfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties: 
+      Name: !Sub Infra-Config-${pEnvName}
+      Description: infrastructure configuration
+      InstanceProfileName: !Ref InstanceProfile
+      InstanceTypes: 
+        - m5.large
+      Logging:
+        S3Logs:
+          S3BucketName: !Ref pLoggingBucket
+          S3KeyPrefix: "ImageBuilderLogs"
+      ResourceTags:
+        CostCenter: !Ref pCostCenter
+        Purpose: ImageBuilder
+      KeyPair: !Ref pKeyName
+      SecurityGroupIds: 
+        - !Ref ImageBuilderSecurityGroup
+      SubnetId: !Ref pSubnetId
+      TerminateInstanceOnFailure: true
+      Tags: 
+        CostCenter: !Ref pCostCenter
+
+#The below creates a recipe for our AMIs from the desired components
+  ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties: 
+      Name: Linux-Recipe
+      Description: Linux ami recipe
+      Version: 1.0.0
+      ParentImage: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-18-lts-x86/x.x.x" #x.x.x will guarantee the latest
+      Components:
+        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
+        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
+        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/docker-ce-ubuntu/1.0.0"
+        - ComponentArn: !Ref CreateFileComponent
+      Tags:
+        CostCenter: !Ref pCostCenter
+
+#The below creates an Image from the recipe above
+  Image:
+    Type: AWS::ImageBuilder::Image
+    Properties: 
+      EnhancedImageMetadataEnabled: true
+      ImageRecipeArn: !Ref ImageRecipe
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+      Tags:
+        Name: MyLinuxAMI
+        CostCenter: !Ref pCostCenter
+
+
+
+Outputs:
+  AMIarn:
+    Value: !Ref Image
+    Description: The produced AMI Arn.
+  AMIid:
+    Value: !GetAtt Image.ImageId
+    Description: The produced AMI Id.
