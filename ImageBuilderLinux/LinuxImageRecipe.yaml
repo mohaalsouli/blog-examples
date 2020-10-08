@@ -97,7 +97,10 @@ Resources:
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - echo "I am contents." > myFile.txt
+                    - echo "Creating file.."
+                    - touch /home/ubuntu/myFile.txt
+                    - echo "Adding contents.."
+                    - echo "I am contents." > /home/ubuntu/myFile.txt
           - name: test
             steps:
               - name: TestFile
@@ -106,7 +109,7 @@ Resources:
                 maxAttempts: 2
                 inputs:
                   commands:
-                    - if [ -e myFile.txt ]; then echo "File exists."; fi || exit 1
+                    - if test -f "/home/ubuntu/myFile.txt"; then echo "File found."; else echo "File not found!" && exit 1; fi
 
 #The below creates the Infrastructure Configuration for our EC2 Image Builder
   InfrastructureConfiguration:
@@ -139,7 +142,7 @@ Resources:
       Name: Linux-Recipe
       Description: Linux ami recipe
       Version: 1.0.0
-      ParentImage: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-18-lts-x86/x.x.x" #x.x.x will guarantee the latest
+      ParentImage: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-20-lts-x86/x.x.x" #x.x.x will guarantee the latest
       Components:
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
