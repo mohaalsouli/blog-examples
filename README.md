@@ -1,8 +1,7 @@
-**This is a repo to maintain templates and code examples for my blogs and posts!**
+### This is a repo to maintain templates and code examples for my blogs and posts!
 
 ---
-**When creating CloudFormation stacks, it's highly recommended to
-[add Tags in the stack Options](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-add-tags.html "Open CloudFormation Documentation").**
+### When creating CloudFormation stacks, it's highly recommended to [add Tags in the stack Options](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-add-tags.html "Open CloudFormation Documentation").
 
 ---
 ---
