@@ -98,7 +98,9 @@ Resources:
                 inputs:
                   commands:
                     - |
+                      Write-Host "Creating file.."
                       New-Item C:\myFile.txt -Force
+                      Write-Host "Adding contents.."
                       Add-Content -Path C:\myFile.txt -Value "I am contents."
           - name: test
             steps:
@@ -108,7 +110,7 @@ Resources:
                 maxAttempts: 2
                 inputs:
                   commands:
-                    - If (Test-Path -Path "C:\myFile.txt") {Write-Host "File exists." } Else {throw "Couldn't find the file!"}
+                    - If (Test-Path -Path "C:\myFile.txt") {Write-Host "File found."} Else {throw "File not found!"}
 
 #The below creates the Infrastructure Configuration for our EC2 Image Builder
   InfrastructureConfiguration:
